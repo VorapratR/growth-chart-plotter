@@ -144,12 +144,15 @@ Roughly top-to-bottom:
   scripts + closed-loop numeric checks against the digitized data,
   none of which are saved/committed anywhere. Worth formalizing if this
   keeps growing. CI (below) currently only checks that the bundle builds.
-- Data persistence: the app keeps everything in the in-memory `S` object
-  (`src/main.js`) — a reload loses all input. Planned direction is
-  client-side storage (localStorage autosave first, then an IndexedDB
-  multi-patient store), keeping the "data never leaves the browser"
-  property so it can still ship on GitHub Pages. The `S` <-> storage
-  boundary is also where a future backend-sync layer would attach.
+- Data persistence — direction is client-side only (keeps the "data never
+  leaves the browser" property, so it still ships on GitHub Pages):
+  - **Phase 1 (done):** `saveState()` / `loadState()` / `syncControls()` in
+    `src/main.js` autosave `S` to `localStorage` on every `renderAll()` and
+    restore it on startup. "ล้างข้อมูลทั้งหมด" button wipes it.
+  - **Phase 2 (todo):** IndexedDB multi-patient store — split `S` into
+    `patient` + `visit` records, patient-list sidebar, search, soft-delete.
+  - The `S` <-> storage boundary is where a future backend-sync layer would
+    attach, if a real multi-device need ever appears.
 
 ## Deployment / CI
 
