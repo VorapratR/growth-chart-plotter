@@ -1,0 +1,16 @@
+{
+  "name": "growth-chart-plotter",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Single-file offline growth-chart web app for Thai pediatric growth references (TSPE, demo)",
+  "license": "MIT",
+  "scripts": {
+    "build": "bash build.sh",
+    "test": "node --test \"tests/unit/**/*.test.js\"",
+    "test:e2e": "playwright test",
+    "test:all": "npm run test && npm run build && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.0"
+  }
+}

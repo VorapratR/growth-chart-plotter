@@ -21,6 +21,7 @@ touch dist/.nojekyll   # serve dist/ as-is on GitHub Pages (skip Jekyll)
   cat src/fonts/thai_fonts.js
   cat src/data/tspe_lms_and_cdc.js
   cat src/data/all_new_lms.js
+  cat src/engine.js
   cat src/main.js
   echo '</script>'
   echo '</body></html>'

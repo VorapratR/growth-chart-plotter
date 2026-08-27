@@ -25,14 +25,26 @@ build.sh                Regenerates dist/index.html from src/
 src/
   head.html             <head>: CSS, embedded @font-face (base64)
   body.html              <body> markup: layout, forms, chart/results containers
-  main.js                 All app logic (~1080 lines) — see "Code map" below
+  engine.js               Pure LMS math (lmsAt, z<->value, pctFromZ, splice, …);
+                          concatenated ahead of main.js, also require()d by tests
+  main.js                 App logic (~1090 lines) — see "Code map" below
   data/
     tspe_lms_and_cdc.js   Height/weight LMS tables, 2–19y (TSPE + CDC reference)
     all_new_lms.js        BMI, head-circumference, 0–2y, weight-for-height LMS tables
   fonts/thai_fonts.js      IBM Plex Sans/Mono as base64 (used by the PDF exporter)
   vendor/                  jsPDF + svg2pdf.js (MIT), vendored inline, unmodified
+tests/
+  unit/                   node --test (zero deps): engine round-trips, table
+                          integrity, boundary resolution, closed-loop vs the
+                          digitized source curves in extraction/digitized_raw/
+  e2e/app.spec.js          Playwright: demo→chart→results, velocity column,
+                          persistence, multi-patient sidebar, migration, export
 extraction/               How the reference data was produced (see below)
 ```
+
+`npm test` runs the unit tests (no install needed beyond `node`); `npm run
+test:all` also builds and runs the Playwright e2e suite (needs `npm ci` +
+`npx playwright install chromium`).
 
 ## What this app does
 
@@ -85,12 +97,13 @@ reference for reconstructing it if needed.
 
 ## Code map (`src/main.js`)
 
-Roughly top-to-bottom:
+Roughly top-to-bottom (the LMS engine itself — `lmsAt` cubic-Hermite
+interpolation, `zFromValue`/`valueFromZ` Cole & Green, `pctFromZ`,
+`splice()`/`fixed()` — is in `src/engine.js`, concatenated just before this
+file):
 1. Reference registry (`REFS`) — swappable TSPE/CDC tables for the 2–19y leg
-2. LMS engine — `lmsAt` (cubic-Hermite interpolation over the LMS table),
-   `zFromValue`/`valueFromZ` (Cole & Green formula), `pctFromZ`
-3. `splice()`/`fixed()` — wrap two age-banded tables (or one) into a single
-   lookup function per sex/indicator
+2. Percentile / z-score band constants (`PCTS`, `PCT_Z`, `ZBAND`)
+3. `indicators()` — composes `splice()`/`fixed()` into sex→x→{L,M,S} per indicator
 4. `MODES` — the 4 chart-mode configs (domains, panels, labels)
 5. State + persistence — `S` (open patient + view settings), the IndexedDB
    wrapper (`openDB`/`dbGetAll`/`dbPut`/…), `patientFromS`/`sFromPatient`,
@@ -138,19 +151,34 @@ Roughly top-to-bottom:
   child (the chart's `min-width:900px`) force the *entire grid track*
   wider, including the sidebar — breaks mobile layout entirely if you
   remove the `min-width:0` on `.wrap > div`.
+- Patient switching must update `S._pid` *synchronously* — `applyPatient()`
+  does the whole `sFromPatient` + form + render synchronously, then the
+  IndexedDB write happens after. An earlier version awaited the DB first, so
+  a keystroke landing right after "+ เพิ่มคนไข้" was saved onto the *previous*
+  patient (the `#hn` input handler persists to whatever `S._pid` currently
+  is). e2e test "manages multiple patients" guards this.
+- An explicit `display:` in author CSS overrides the UA `[hidden]` rule, so
+  `button.linky` needs its own `[hidden]{display:none}` — otherwise the
+  "ดูที่ลบแล้ว" toggle (shown/hidden via the `hidden` property) never hides.
+
+## Done since the original handoff
+
+- **Growth velocity** — the results table (and the PDF) now show unit/year
+  change between consecutive visits for the age-axis modes (`velocity()` in
+  `main.js`; weight-for-height has no time axis so it's omitted there).
+- **Automated tests** — `tests/unit/` (node --test, zero deps) covers the LMS
+  engine, table integrity, the boundary cases listed below, and a closed-loop
+  check of the shipped tables against `extraction/digitized_raw/`.
+  `tests/e2e/app.spec.js` (Playwright) covers the UI + persistence. Both run
+  in CI. `initApp()` sets `<html data-ready>` when startup finishes — e2e
+  tests wait on that.
 
 ## Not yet done
 
-- Growth velocity (rate of change between consecutive visits, e.g. cm/yr)
-  — flagged as wanted, not implemented.
 - Only tested against Chromium (Playwright). Safari/Firefox were never
   actually verified — the sandbox this was built in couldn't download
   those browser engines (network-restricted). If something looks broken
   specifically on iOS Safari, start there.
-- No automated test suite — verification throughout was ad hoc Playwright
-  scripts + closed-loop numeric checks against the digitized data,
-  none of which are saved/committed anywhere. Worth formalizing if this
-  keeps growing. CI (below) currently only checks that the bundle builds.
 - Data persistence — direction is client-side only (keeps the "data never
   leaves the browser" property, so it still ships on GitHub Pages):
   - **Phase 1 (done):** localStorage autosave of `S`.
@@ -173,9 +201,10 @@ Roughly top-to-bottom:
 
 - `git` repo is `handoff/` itself (was previously nested under an unrelated
   `~/Desktop/.git` with no commits).
-- `.github/workflows/ci.yml` — runs `build.sh` on every push/PR, asserts the
-  bundle built and that the committed `dist/` matches a fresh build (so a
-  `src/` edit without a rebuild fails the check).
+- `.github/workflows/ci.yml` — on every push/PR: `build-and-unit` job builds,
+  asserts the bundle built and that the committed `dist/` matches a fresh
+  build (so a `src/` edit without a rebuild fails the check), then runs the
+  `node --test` unit suite; `e2e` job runs the Playwright suite in Chromium.
 - `.github/workflows/deploy.yml` — on push to `main`, rebuilds and publishes
   `dist/` to GitHub Pages via `actions/deploy-pages`. Needs a one-time
   **Settings -> Pages -> Source: GitHub Actions** in the repo.

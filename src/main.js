@@ -8,70 +8,13 @@ const REFS = {
 
 /* ---------------------------------------------------------------
    2. LMS engine
+   `lmsAt`, `zFromValue`, `valueFromZ`, `erfc`, `pctFromZ`, `ageYears`,
+   `splice`, `fixed` live in src/engine.js (concatenated just before this
+   file by build.sh; also unit-tested directly under tests/unit/).
 ----------------------------------------------------------------*/
 const PCTS = [3, 10, 25, 50, 75, 90, 97];
 const PCT_Z = { 3: -1.880794, 10: -1.281552, 25: -0.674490, 50: 0, 75: 0.674490, 90: 1.281552, 97: 1.880794 };
 const ZBAND = [-3, -2, -1.5, -1, 0, 1, 1.5, 2, 3];
-
-function lmsAt(tab, x) {
-  const n = tab.length, EPS = 0.1;
-  if (x < tab[0][0] - EPS || x > tab[n - 1][0] + EPS) return null;
-  x = Math.max(tab[0][0], Math.min(tab[n - 1][0], x));
-  let i = 0;
-  while (i < n - 2 && tab[i + 1][0] < x) i++;
-  const x0 = tab[i][0], x1 = tab[i + 1][0], h = x1 - x0;
-  const t = h === 0 ? 0 : (x - x0) / h;
-  const t2 = t * t, t3 = t2 * t;
-  const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
-  const out = [];
-  for (let k = 1; k <= 3; k++) {
-    const y0 = tab[i][k], y1 = tab[i + 1][k];
-    const pm = tab[i - 1] || tab[i], pn = tab[i + 2] || tab[i + 1];
-    const m0 = (y1 - pm[k]) / (x1 - pm[0]) * h;
-    const m1 = (pn[k] - y0) / (pn[0] - x0) * h;
-    out.push(h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1);
-  }
-  return { L: out[0], M: out[1], S: out[2] };
-}
-function zFromValue(p, x) {
-  return Math.abs(p.L) < 1e-7 ? Math.log(x / p.M) / p.S
-                              : (Math.pow(x / p.M, p.L) - 1) / (p.L * p.S);
-}
-function valueFromZ(p, z) {
-  return Math.abs(p.L) < 1e-7 ? p.M * Math.exp(p.S * z)
-                              : p.M * Math.pow(1 + p.L * p.S * z, 1 / p.L);
-}
-function erfc(x) {
-  const z = Math.abs(x), t = 1 / (1 + z / 2);
-  const r = t * Math.exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 +
-    t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
-  return x >= 0 ? r : 2 - r;
-}
-const pctFromZ = z => 100 * 0.5 * erfc(-z / Math.SQRT2);
-
-function ageYears(dob, when) {
-  const a = new Date(dob), b = new Date(when);
-  if (isNaN(a) || isNaN(b)) return null;
-  return (b - a) / 86400000 / 365.2425;
-}
-
-/* splice two tables at a boundary x -- deliberately NOT smoothed across the
-   seam: TSPE's own 0-2y (recumbent length) vs 2-19y (standing height) and
-   0-5y vs 5-19y BMI charts have a real small jump at the boundary (different
-   measurement method / source study), so each side is queried independently
-   from its own native table rather than merged into one interpolation run. */
-function splice(lowTab, highTab, splitXMonths, toMonths) {
-  return x => {
-    if (x == null) return null;
-    const xm = toMonths ? toMonths(x) : x;
-    const primary = xm < splitXMonths ? lowTab : highTab;
-    const secondary = xm < splitXMonths ? highTab : lowTab;
-    return lmsAt(primary, xm) || lmsAt(secondary, xm);
-  };
-}
-function fixed(tab, toMonths) {
-  return x => x == null ? null : lmsAt(tab, toMonths ? toMonths(x) : x);
-}
 
 /* ---------------------------------------------------------------
    3. Indicators: sex -> (x) -> {L,M,S}|null
@@ -283,19 +226,30 @@ async function livePatients() {
   return (await dbGetAll()).filter(p => !p.deletedAt)
     .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
-async function openPatient(id) {
-  const p = await dbGet(id);
-  if (!p) return;
+/* Switch the live editor (S + form + chart) to a patient. Deliberately
+   synchronous: a keystroke that lands immediately after a patient-switch
+   action must go to the new record, so S._pid has to be updated before any
+   await hands control back to the event loop. renderAll()'s saveState()
+   persists the patient as part of this. */
+function applyPatient(p) {
   sFromPatient(p);
   savePrefs();
   syncControls();
-  renderVisitHead(); renderVisits(); renderAll();
+  renderVisitHead();
+  renderVisits();
+  renderAll();
+}
+async function openPatient(id) {
+  const p = await dbGet(id);
+  if (!p) return;
+  applyPatient(p);
   renderSidebar();
 }
 async function newPatientAndOpen(seed) {
   const p = seed ? patientFromImport(seed) : blankPatient();
-  if (_db) { await dbPut(p); await openPatient(p.id); }
-  else { sFromPatient(p); syncControls(); renderVisitHead(); renderVisits(); renderAll(); }
+  applyPatient(p);
+  if (_db) await dbPut(p).catch(() => {});   // ensure the row exists before the list re-renders
+  renderSidebar();
 }
 async function deletePatient(id) {
   const p = await dbGet(id);
@@ -653,33 +607,55 @@ function bandOfBmi(ageYr, bmiVal, z) {
   return cls ? [cls, true] : bandOfZ(z);
 }
 
+/* Growth velocity between consecutive visits, in unit/year. Only meaningful
+   for the age-axis modes (ht/wt, BMI, head circ) -- weight-for-height has no
+   time axis. `prev` carries the last visit that had a finite value for that
+   panel, so a gap visit (missing measurement) doesn't break the chain. */
+function velocity(prev, xv, val) {
+  if (!prev || !isFinite(val) || xv - prev.x <= 1 / 365.2425) return null;   // need >= ~1 day apart
+  return (val - prev.val) / (xv - prev.x);
+}
+
 function renderResults() {
   const box = document.getElementById('results');
   const mode = curMode(), ind = curIndicators();
+  const showVel = mode.xKind === 'age';
+  const prev = mode.panels.map(() => null);
   const rows = [];
   for (const v of sortedVisits(mode)) {
     const xv = xOfVisit(mode, v);
-    const cells = mode.panels.map(P => {
+    const cells = mode.panels.map((P, pi) => {
       const val = P.yOf(v);
-      if (!isFinite(val)) return { v: '—', z: '—', pc: '—', b: '' };
+      const rate = showVel ? velocity(prev[pi], xv, val) : null;
+      const vel = rate == null ? '—' : (rate >= 0 ? '+' : '') + rate.toFixed(1);
+      if (isFinite(val)) prev[pi] = { x: xv, val };
+      if (!isFinite(val)) return { v: '—', vel, z: '—', pc: '—', b: '' };
       const p = ind[P.indicator][S.sex](xv);
-      if (!p) return { v: val.toFixed(1), z: 'นอกช่วง', pc: '—', b: '' };
+      if (!p) return { v: val.toFixed(1), vel, z: 'นอกช่วง', pc: '—', b: '' };
       const z = zFromValue(p, val);
       if (P.band === 'z') {
         const [lbl, bad] = P.indicator === 'bmi' ? bandOfBmi(xv, val, z) : bandOfZ(z);
-        return { v: val.toFixed(1), z: (z >= 0 ? '+' : '') + z.toFixed(2), pc: '—', b: `<span class="band${bad ? ' out' : ''}">${lbl}</span>` };
+        return { v: val.toFixed(1), vel, z: (z >= 0 ? '+' : '') + z.toFixed(2), pc: '—', b: `<span class="band${bad ? ' out' : ''}">${lbl}</span>` };
       }
       const pc = pctFromZ(z), [lbl, bad] = bandOfPct(pc);
-      return { v: val.toFixed(1), z: (z >= 0 ? '+' : '') + z.toFixed(2), pc: pc.toFixed(1), b: `<span class="band${bad ? ' out' : ''}">${lbl}</span>` };
+      return { v: val.toFixed(1), vel, z: (z >= 0 ? '+' : '') + z.toFixed(2), pc: pc.toFixed(1), b: `<span class="band${bad ? ' out' : ''}">${lbl}</span>` };
     });
     const xLabel = mode.xKind === 'height' ? xv.toFixed(1) : xv.toFixed(2);
     let row = `<td>${esc(v.date || '—')}</td><td>${xLabel}</td>`;
-    cells.forEach((c, i) => { row += `<td>${c.v}</td><td>${c.z}</td>` + (mode.panels[i].band === 'z' ? '' : `<td>${c.pc}</td>`) + `<td>${c.b}</td>`; });
+    cells.forEach((c, i) => {
+      row += `<td>${c.v}</td>`
+        + (showVel ? `<td class="vel">${c.vel}</td>` : '')
+        + `<td>${c.z}</td>` + (mode.panels[i].band === 'z' ? '' : `<td>${c.pc}</td>`) + `<td>${c.b}</td>`;
+    });
     rows.push(`<tr>${row}</tr>`);
   }
   if (!rows.length) { box.innerHTML = '<p class="empty">ใส่ข้อมูลเพื่อดูผล</p>'; return; }
   let head = `<th>วันที่</th><th>${mode.xKind === 'height' ? 'ส่วนสูง' : 'อายุ (ปี)'}</th>`;
-  mode.panels.forEach(P => { head += `<th>${esc(P.title)}</th><th>Z</th>` + (P.band === 'z' ? '' : '<th>%ile</th>') + `<th>ช่วง</th>`; });
+  mode.panels.forEach(P => {
+    head += `<th>${esc(P.title)}</th>`
+      + (showVel ? `<th>${esc(P.unit)}/ปี</th>` : '')
+      + `<th>Z</th>` + (P.band === 'z' ? '' : '<th>%ile</th>') + `<th>ช่วง</th>`;
+  });
   box.innerHTML = `<table class="out"><thead><tr>${head}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
 }
 
@@ -999,8 +975,9 @@ document.getElementById('btnPdf').addEventListener('click', async () => {
     doc.text('ผลการคำนวณ', margin, y); y += 5;
     doc.setFont(FONT, 'normal'); doc.setFontSize(7.5);
     const xColLabel = mode.xKind === 'height' ? 'สูง(ซม)' : 'อายุ(ปี)';
+    const showVel = mode.xKind === 'age';
     let headers = ['วันที่', xColLabel];
-    mode.panels.forEach(P => { headers.push(P.shortTitle || P.title, 'Z', P.band === 'z' ? 'ช่วง' : '%ile', P.band === 'z' ? null : 'ช่วง'); });
+    mode.panels.forEach(P => { headers.push(P.shortTitle || P.title, showVel ? 'Δ/ปี' : null, 'Z', P.band === 'z' ? 'ช่วง' : '%ile', P.band === 'z' ? null : 'ช่วง'); });
     headers = headers.filter(h => h !== null);
     const colW = (pageW - margin * 2) / headers.length;
     const colX = headers.map((_, i) => margin + i * colW);
@@ -1010,19 +987,23 @@ document.getElementById('btnPdf').addEventListener('click', async () => {
     y += 4;
 
     const ind = curIndicators();
+    const prevVel = mode.panels.map(() => null);
     for (const v of sortedVisits(mode)) {
       const xv = xOfVisit(mode, v);
       const row = [v.date || '-', mode.xKind === 'height' ? xv.toFixed(1) : xv.toFixed(2)];
-      for (const P of mode.panels) {
+      mode.panels.forEach((P, pi) => {
         const val = P.yOf(v);
         const p = isFinite(val) ? ind[P.indicator][S.sex](xv) : null;
         const z = p ? zFromValue(p, val) : null;
+        const rate = showVel ? velocity(prevVel[pi], xv, val) : null;
+        if (isFinite(val)) prevVel[pi] = { x: xv, val };
         row.push(isFinite(val) ? val.toFixed(1) : '-');
+        if (showVel) row.push(rate == null ? '-' : (rate >= 0 ? '+' : '') + rate.toFixed(1));
         row.push(z != null ? (z >= 0 ? '+' : '') + z.toFixed(2) : '-');
         if (z == null) { row.push('-'); if (P.band !== 'z') row.push('-'); }
         else if (P.band === 'z') row.push((P.indicator === 'bmi' ? bandOfBmi(xv, val, z) : bandOfZ(z))[0]);
         else { const pc = pctFromZ(z); row.push(pc.toFixed(1)); row.push(bandOfPct(pc)[0]); }
-      }
+      });
       row.forEach((c, i) => doc.text(String(c), colX[i], y));
       y += 5;
       if (y > pageH - 20) { doc.addPage(); doc.setFillColor(...bg); doc.rect(0, 0, pageW, pageH, 'F'); y = 16; }
@@ -1075,5 +1056,6 @@ async function initApp() {
   renderVisits();
   renderAll();
   renderSidebar();
+  document.documentElement.dataset.ready = '1';   // startup done (DB open, patient loaded) -- e2e tests wait on this
 }
 initApp().catch(err => { console.error(err); alert('เริ่มต้นแอปไม่สำเร็จ: ' + err.message); });

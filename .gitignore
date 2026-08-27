@@ -7,9 +7,15 @@ Thumbs.db
 .idea/
 *.swp
 
-# Node (only used by build.sh for `node --check`; no deps installed)
+# Node
 node_modules/
 npm-debug.log*
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
 
 # Python (extraction pipeline)
 __pycache__/

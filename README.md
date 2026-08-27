@@ -50,7 +50,7 @@ This repo ships two GitHub Actions workflows:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `.github/workflows/ci.yml` | every push / PR | runs `build.sh`, checks the bundle built and that `dist/` is up to date |
+| `.github/workflows/ci.yml` | every push / PR | builds, checks `dist/` is up to date, runs the unit + Playwright tests |
 | `.github/workflows/deploy.yml` | push to `main` (or manual run) | rebuilds and publishes `dist/` to GitHub Pages |
 
 One-time setup after forking:
@@ -61,11 +61,16 @@ One-time setup after forking:
 3. Served at https://YOUR_USERNAME.github.io/YOUR_REPO/
 ```
 
-### Building locally
+### Building & testing locally
 
-`./build.sh` regenerates `dist/index.html` from `src/`. It needs `bash`,
-`node` (for a post-build `node --check` syntax pass) and `python3`. No
-`npm install` — there are no dependencies to fetch.
+```
+./build.sh          # regenerate dist/index.html from src/ (needs bash, node, python3)
+npm test            # unit tests — LMS engine + reference-data checks (node only, no install)
+npm ci && npx playwright install chromium && npm run test:all   # + end-to-end suite
+```
+
+The build itself needs no `npm install`; only the Playwright e2e suite has
+dependencies.
 
 ## Third-party code bundled inline
 
