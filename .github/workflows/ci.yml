@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build dist/index.html
+        run: bash build.sh
+
+      - name: Verify build output
+        run: |
+          test -f dist/index.html || { echo "::error::dist/index.html was not produced"; exit 1; }
+          bytes=$(wc -c < dist/index.html)
+          echo "dist/index.html = ${bytes} bytes"
+          # Floor check: the bundle inlines fonts + jsPDF + svg2pdf, so it is
+          # always well over 1 MB. Anything smaller means a source file went missing.
+          if [ "$bytes" -lt 1000000 ]; then
+            echo "::error::dist/index.html is only ${bytes} bytes — build is broken"
+            exit 1
+          fi
+          grep -q "</body></html>" dist/index.html || { echo "::error::bundle is truncated"; exit 1; }
+
+      - name: Check dist/ is committed and up to date
+        run: |
+          if ! git diff --exit-code -- dist/; then
+            echo "::error::dist/ is stale — run ./build.sh locally and commit the result."
+            exit 1
+          fi

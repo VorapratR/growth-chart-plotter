@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Node (only used by build.sh for `node --check`; no deps installed)
+node_modules/
+npm-debug.log*
+
+# Python (extraction pipeline)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Scratch
+*.log
+/tmp/
+/scratch/
+
+# TSPE source PDFs — third-party material, kept out of the initial commit
+# pending a decision on repo visibility / redistribution rights.
+# To include them: delete the two lines below, then `git add extraction/source_pdfs`.
+extraction/source_pdfs/*.pdf

@@ -1,0 +1,12 @@
+# Keep GitHub's language stats and diffs meaningful: the bundle and the
+# base64-heavy assets would otherwise drown out the actual source.
+dist/index.html    linguist-generated=true
+src/vendor/**      linguist-vendored=true
+src/fonts/**       linguist-vendored=true
+src/data/**        linguist-generated=true
+
+# build.sh is a byte-exact concatenation of src/ -> dist/. Pin line endings
+# so a fresh build on the CI runner matches the committed dist/ exactly.
+src/**             -text
+dist/**            -text
+*.sh               text eol=lf

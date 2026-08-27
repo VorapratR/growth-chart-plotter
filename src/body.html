@@ -1,0 +1,106 @@
+
+<header class="top">
+  <h1>Growth Chart Plotter</h1>
+  <span class="sub">คีย์ข้อมูล → พล็อตกราฟ + คำนวณ percentile / z-score อัตโนมัติ</span>
+  <span class="badge" id="refBadge">REF: TSPE 2565</span>
+</header>
+
+<div class="wrap">
+  <!-- ============ LEFT: input ============ -->
+  <div>
+    <section class="card">
+      <h2>ชนิดกราฟ</h2>
+      <div class="body">
+        <div class="seg seg4" id="modeSeg">
+          <button type="button" data-mode="ht_wt" aria-pressed="true">สูง/นน. ตามอายุ</button>
+          <button type="button" data-mode="bmi" aria-pressed="false">BMI ตามอายุ</button>
+          <button type="button" data-mode="hc" aria-pressed="false">รอบศีรษะ</button>
+          <button type="button" data-mode="wfh" aria-pressed="false">นน. ตามส่วนสูง</button>
+        </div>
+        <p class="note" id="modeHint" style="padding:8px 0 0"></p>
+        <label class="f" id="styleField" style="margin-top:10px"><span>รูปแบบกราฟ</span>
+          <div class="seg" id="styleSeg">
+            <button type="button" data-style="combined" aria-pressed="true">กราฟรวม (แบบต้นฉบับ)</button>
+            <button type="button" data-style="stacked" aria-pressed="false">กราฟแยก</button>
+          </div>
+        </label>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <h2>ข้อมูลผู้ป่วย</h2>
+      <div class="body">
+        <label class="f"><span>เพศ</span>
+          <div class="seg" id="sexSeg">
+            <button type="button" data-sex="F" aria-pressed="true">หญิง</button>
+            <button type="button" data-sex="M" aria-pressed="false">ชาย</button>
+          </div>
+        </label>
+        <label class="f"><span>ชื่อ / HN</span>
+          <input type="text" id="hn" placeholder="เช่น 68-04027">
+        </label>
+        <label class="f" id="dobField"><span>วันเกิด (DOB)</span>
+          <input type="date" id="dob">
+        </label>
+        <div class="row2" id="parentHeightField">
+          <label class="f"><span>ส่วนสูงพ่อ (ซม.)</span><input type="number" id="fh" step="0.1" placeholder="163"></label>
+          <label class="f"><span>ส่วนสูงแม่ (ซม.)</span><input type="number" id="mh" step="0.1" placeholder="162"></label>
+        </div>
+        <div class="mph" id="mphField">
+          <span>Mid-parental height</span>
+          <b id="mphOut">—</b>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <h2>การวัดแต่ละครั้ง</h2>
+      <div class="body">
+        <table class="visits">
+          <thead id="visitHead"></thead>
+          <tbody id="visitRows"></tbody>
+        </table>
+        <button class="add" id="addRow" type="button">+ เพิ่มการวัด</button>
+        <div class="tools">
+          <button type="button" id="btnDemo">ใส่ข้อมูลตัวอย่าง</button>
+          <button type="button" id="btnPdf">Export PDF</button>
+          <button type="button" id="btnExport">Export JSON</button>
+          <button type="button" id="btnPrint">พิมพ์</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px" id="refCard">
+      <h2>ชุดข้อมูลอ้างอิง</h2>
+      <div class="body">
+        <label class="f"><span>Reference dataset</span>
+          <select id="refSel"><option value="tspe2565">TSPE 2565 — สกัดจาก PDF ต้นฉบับ</option>
+          <option value="cdc2000">CDC 2000 — อ้างอิงเทียบ (เฉพาะสูง/นน. 2-19 ปี)</option></select>
+        </label>
+        <div class="tools" style="margin-top:0">
+          <button type="button" id="btnImport">นำเข้าตาราง LMS (.json)</button>
+        </div>
+        <input type="file" id="fileLms" accept=".json,application/json" hidden>
+      </div>
+      <p class="note">
+        เอนจินคำนวณจากตาราง <code>[x, L, M, S]</code> ล้วน ๆ (x = อายุเป็นเดือน หรือส่วนสูงเป็นซม. สำหรับโหมด
+        &quot;นน. ตามส่วนสูง&quot;) — สลับชุดข้อมูลได้โดยไม่ต้องแก้โค้ด
+      </p>
+    </section>
+  </div>
+
+  <!-- ============ RIGHT: chart + results ============ -->
+  <div>
+    <section class="card">
+      <h2>กราฟการเจริญเติบโต <span id="chartTitle" style="text-transform:none;letter-spacing:0"></span></h2>
+      <div class="chartwrap"><svg class="chart" id="svg" viewBox="0 0 900 706" role="img" aria-label="growth chart"></svg></div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
+      <h2>ผลการคำนวณ</h2>
+      <div id="results"><p class="empty">ใส่ข้อมูลเพื่อดูผล</p></div>
+      <p class="note" id="formulaNote"></p>
+    </section>
+  </div>
+</div>
+
