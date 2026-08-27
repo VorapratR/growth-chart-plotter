@@ -5,8 +5,7 @@ references — height/length & weight for age, BMI for age, head circumference,
 and weight-for-height. Digitized from the Thai Society for Pediatric
 Endocrinology (TSPE) "New Thai Growth Chart" and BMI Z-score chart PDFs.
 
-**[Live demo →](https://YOUR_USERNAME.github.io/YOUR_REPO/)**
-*(replace with your actual GitHub Pages URL after publishing)*
+**[Live demo →](https://vorapratr.github.io/growth-chart-plotter/)**
 
 ## What it does
 
