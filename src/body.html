@@ -5,6 +5,8 @@
   <span class="badge" id="refBadge">REF: TSPE 2565</span>
 </header>
 
+<div id="storageWarn" role="alert" hidden>⚠️ บันทึกข้อมูลลงเครื่องไม่สำเร็จ (พื้นที่เก็บเต็ม หรือเบราว์เซอร์ล้างข้อมูล) — กด <b>Export JSON</b> เพื่อสำรองข้อมูลทันที</div>
+
 <div class="wrap">
   <!-- ============ LEFT: input ============ -->
   <div>
@@ -82,7 +84,7 @@
           <button type="button" id="btnClear">ล้างข้อมูลทั้งหมด</button>
         </div>
         <input type="file" id="filePatients" accept=".json,application/json" hidden>
-        <p class="note" style="padding:8px 2px 0;border:0">คนไข้ทุกรายบันทึกอัตโนมัติในเบราว์เซอร์นี้เท่านั้น (IndexedDB) — ไม่ส่งออกไปที่ใด และจะหายถ้าล้างข้อมูลเว็บไซต์ · Export JSON = สำรอง/ย้ายเครื่องได้ทั้งหมด</p>
+        <p class="note" style="padding:8px 2px 0;border:0">คนไข้ทุกรายบันทึกอัตโนมัติในเบราว์เซอร์นี้เท่านั้น (IndexedDB) — ไม่ส่งออกไปที่ใด · <b>ข้อมูลอาจหายเอง</b> ถ้าล้างข้อมูลเว็บไซต์ หรือไม่ได้เปิดเว็บนี้นานหลายวัน (โดยเฉพาะบน Safari) — <b>กด Export JSON เก็บไฟล์สำรองเป็นระยะ</b> (ใช้ย้ายเครื่องได้ด้วย)</p>
       </div>
     </section>
 

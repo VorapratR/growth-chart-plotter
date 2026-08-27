@@ -85,6 +85,61 @@ test('manages multiple patients: add, switch, search, soft-delete, restore', asy
   await expect(page.locator('#ptList .pt')).toHaveCount(2);
 });
 
+test('typing right after "+ เพิ่มคนไข้" does not clobber the previous patient', async ({ page }) => {
+  await open(page);
+  await page.fill('#hn', 'Keep Me');
+  await page.getByRole('button', { name: '+ เพิ่มคนไข้' }).click();
+  // the switch must be synchronous — S._pid updated before control returns:
+  await expect(page.locator('#hn')).toHaveValue('');
+  await expect(page.locator('#ptList .pt.cur b')).toHaveText('(ไม่ระบุชื่อ/HN)');
+  await page.fill('#hn', 'New One');            // goes to the new patient, not "Keep Me"
+
+  await row(page, 'Keep Me').locator('.pt-main').click();
+  await expect(page.locator('#hn')).toHaveValue('Keep Me');   // the old bug wrote '' here
+});
+
+test('export -> import round-trips patient data', async ({ page }) => {
+  await open(page);
+  await page.fill('#hn', 'RT One');
+  await page.fill('#dob', '2017-02-03');
+  await page.getByRole('button', { name: '+ เพิ่มคนไข้' }).click();
+  await page.fill('#hn', 'RT Two');
+  await expect(row(page, 'RT One')).toBeVisible();
+
+  const [dl] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Export JSON' }).click(),
+  ]);
+  const p = await dl.path();
+
+  const onDialog = d => d.accept();               // import fires a confirm then an alert
+  page.on('dialog', onDialog);
+  await page.setInputFiles('#filePatients', p);
+
+  // the two imported copies are added alongside the originals
+  await expect(row(page, 'RT One')).toHaveCount(2);
+  await expect(row(page, 'RT Two')).toHaveCount(2);
+  page.off('dialog', onDialog);
+  await row(page, 'RT One').first().locator('.pt-main').click();
+  await expect(page.locator('#dob')).toHaveValue('2017-02-03');
+});
+
+test('Export PDF produces a file without error', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'ใส่ข้อมูลตัวอย่าง' }).click();
+  const [dl] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('button', { name: 'Export PDF' }).click(),
+  ]);
+  expect(dl.suggestedFilename()).toMatch(/\.pdf$/);
+  const stream = await dl.createReadStream();
+  const chunks = [];
+  for await (const c of stream) chunks.push(c);
+  const buf = Buffer.concat(chunks);
+  expect(buf.length).toBeGreaterThan(1000);
+  expect(buf.slice(0, 5).toString()).toBe('%PDF-');
+});
+
 test('"ล้างข้อมูลทั้งหมด" wipes storage back to one blank patient', async ({ page }) => {
   await open(page);
   await page.fill('#hn', 'Doomed');

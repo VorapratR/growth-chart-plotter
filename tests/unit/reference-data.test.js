@@ -130,32 +130,40 @@ function closedLoop(rawFile, table, xToTableX, keyToZ) {
     }
   }
   errs.sort((a, b) => a - b);
-  return { median: errs[errs.length >> 1], p95: errs[Math.floor(errs.length * 0.95)], max: errs[errs.length - 1], resolvedFrac: resolved / total };
+  return {
+    median: errs[errs.length >> 1], p95: errs[Math.floor(errs.length * 0.95)],
+    max: errs[errs.length - 1], resolvedFrac: resolved / total, n: errs.length,
+  };
 }
+const pctKey = k => PCT_Z[k];
+const sdsKey = k => (Number.isNaN(+k) ? undefined : +k);
 
-test('closed-loop: head circumference (boys & girls) reproduce the source curves', () => {
-  for (const [file, table] of [['boys_hc_raw.json', D.REF_HEADCIRC_M], ['girls_hc_raw.json', D.REF_HEADCIRC_F]]) {
-    const r = closedLoop(file, table, x => x * 12, k => PCT_Z[k]);
-    assert.ok(r.resolvedFrac > 0.8, `${file}: only ${(r.resolvedFrac * 100) | 0}% of points in table domain`);
-    assert.ok(r.median < 0.15, `${file}: median error ${r.median.toFixed(3)} cm too high`);
-    assert.ok(r.p95 < 0.6, `${file}: p95 error ${r.p95.toFixed(3)} cm too high`);
-  }
-});
+/* Tolerances are ~3-5x the measured residuals (the digitization is far tighter
+   than printed line width) -- loose enough not to be flaky, tight enough that a
+   real corruption of a table is caught. resolvedFrac must be exactly 1: every
+   digitized point has to land inside the shipped table's domain. */
+const CASES = [
+  { name: 'head circumference', unit: 'cm', med: 0.02, p95: 0.05,
+    files: [['boys_hc_raw.json', () => D.REF_HEADCIRC_M], ['girls_hc_raw.json', () => D.REF_HEADCIRC_F]],
+    x: v => v * 12, z: pctKey },
+  { name: 'weight-for-height', unit: 'kg', med: 0.02, p95: 0.1,
+    files: [['boys_wfh_raw.json', () => D.REF_WFH_M], ['girls_wfh_raw.json', () => D.REF_WFH_F]],
+    x: v => v, z: pctKey },
+  { name: 'BMI 0-5y', unit: 'kg/m²', med: 0.02, p95: 0.05,
+    files: [['Boy-0-5_bmi_raw.json', () => D.REF_BMI_BOY_0_5], ['Girl-0-5_bmi_raw.json', () => D.REF_BMI_GIRL_0_5]],
+    x: v => v * 12, z: sdsKey },
+  { name: 'BMI 5-19y', unit: 'kg/m²', med: 0.05, p95: 0.4,
+    files: [['Boy-5-19_bmi_raw.json', () => D.REF_BMI_BOY_5_19], ['Girl-5-19_bmi_raw.json', () => D.REF_BMI_GIRL_5_19]],
+    x: v => v * 12, z: sdsKey },
+];
 
-test('closed-loop: weight-for-height (boys & girls) reproduce the source curves', () => {
-  for (const [file, table] of [['boys_wfh_raw.json', D.REF_WFH_M], ['girls_wfh_raw.json', D.REF_WFH_F]]) {
-    const r = closedLoop(file, table, x => x, k => PCT_Z[k]);
-    assert.ok(r.resolvedFrac > 0.8, `${file}: only ${(r.resolvedFrac * 100) | 0}% of points in table domain`);
-    assert.ok(r.median < 0.2, `${file}: median error ${r.median.toFixed(3)} kg too high`);
-    assert.ok(r.p95 < 1.0, `${file}: p95 error ${r.p95.toFixed(3)} kg too high`);
-  }
-});
-
-test('closed-loop: BMI 0-5y (boys & girls) reproduce the source SDS curves', () => {
-  for (const [file, table] of [['Boy-0-5_bmi_raw.json', D.REF_BMI_BOY_0_5], ['Girl-0-5_bmi_raw.json', D.REF_BMI_GIRL_0_5]]) {
-    const r = closedLoop(file, table, x => x * 12, k => (Number.isNaN(+k) ? undefined : +k));
-    assert.ok(r.resolvedFrac > 0.8, `${file}: only ${(r.resolvedFrac * 100) | 0}% resolved`);
-    assert.ok(r.median < 0.2, `${file}: median error ${r.median.toFixed(3)} BMI too high`);
-    assert.ok(r.p95 < 0.7, `${file}: p95 error ${r.p95.toFixed(3)} BMI too high`);
-  }
-});
+for (const c of CASES) {
+  test(`closed-loop: ${c.name} reproduces the digitized source curves`, () => {
+    for (const [file, tableFn] of c.files) {
+      const r = closedLoop(file, tableFn(), c.x, c.z);
+      assert.equal(r.resolvedFrac, 1, `${file}: ${((1 - r.resolvedFrac) * 100).toFixed(0)}% of points fell outside the table domain`);
+      assert.ok(r.median < c.med, `${file}: median error ${r.median.toFixed(4)} ${c.unit} exceeds ${c.med}`);
+      assert.ok(r.p95 < c.p95, `${file}: p95 error ${r.p95.toFixed(4)} ${c.unit} exceeds ${c.p95}`);
+    }
+  });
+}

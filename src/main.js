@@ -126,6 +126,13 @@ const PREFS_KEY = 'growthchart:prefs:v1';
 const PREF_KEYS = ['mode', 'chartStyle', 'ref'];
 const PATIENT_KEYS = ['hn', 'sex', 'dob', 'fh', 'mh', 'visits'];
 const BLANK_VISITS = () => [{ date: '', ht: '', wt: '', hc: '' }];
+const numOrNull = x => { const n = parseFloat(x); return Number.isFinite(n) ? n : null; };
+function normVisits(arr) {
+  const out = (Array.isArray(arr) ? arr : [])
+    .filter(v => v && typeof v === 'object')
+    .map(v => ({ date: String(v.date || ''), ht: String(v.ht ?? ''), wt: String(v.wt ?? ''), hc: String(v.hc ?? '') }));
+  return out.length ? out : BLANK_VISITS();
+}
 
 /* ---- IndexedDB (tiny promise wrapper) ---- */
 const DB_NAME = 'growthchart', DB_VERSION = 1, STORE = 'patients';
@@ -138,7 +145,12 @@ function openDB() {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onblocked = () => reject(new Error('IndexedDB upgrade blocked by another open tab'));
+    req.onsuccess = () => {
+      const db = req.result;
+      db.onversionchange = () => db.close();   // don't block another tab from upgrading
+      resolve(db);
+    };
     req.onerror = () => reject(req.error);
   });
 }
@@ -170,23 +182,29 @@ function blankPatient() {
 function sFromPatient(p) {
   S._pid = p.id;
   S._createdAt = p.createdAt || Date.now();
-  S.hn = p.hn || ''; S.dob = p.dob || '';
-  S.fh = p.fh ?? null; S.mh = p.mh ?? null;
+  S._deletedAt = p.deletedAt || null;
+  S.hn = String(p.hn || ''); S.dob = String(p.dob || '');
+  S.fh = numOrNull(p.fh); S.mh = numOrNull(p.mh);
   S.sex = (p.sex === 'M' || p.sex === 'F') ? p.sex : 'F';
-  S.visits = (Array.isArray(p.visits) && p.visits.length) ? p.visits.map(v => ({
-    date: v.date || '', ht: v.ht || '', wt: v.wt || '', hc: v.hc || ''
-  })) : BLANK_VISITS();
+  S.visits = normVisits(p.visits);
 }
 function patientFromS() {
-  const p = { id: S._pid, createdAt: S._createdAt || Date.now(), updatedAt: Date.now(), deletedAt: null };
-  for (const k of PATIENT_KEYS) p[k] = S[k];
-  return p;
+  return {
+    id: S._pid, hn: String(S.hn || ''), sex: S.sex, dob: String(S.dob || ''),
+    fh: numOrNull(S.fh), mh: numOrNull(S.mh), visits: normVisits(S.visits),
+    createdAt: S._createdAt || Date.now(), updatedAt: Date.now(),
+    deletedAt: S._deletedAt || null,   // preserve -- do NOT resurrect a soft-deleted record
+  };
 }
 function patientFromImport(raw) {
+  raw = raw && typeof raw === 'object' ? raw : {};
   const p = blankPatient();
-  for (const k of PATIENT_KEYS) if (k in raw) p[k] = raw[k];
-  if (p.sex !== 'M' && p.sex !== 'F') p.sex = 'F';
-  if (!Array.isArray(p.visits) || !p.visits.length) p.visits = BLANK_VISITS();
+  p.hn = String(raw.hn || '');
+  p.dob = String(raw.dob || '');
+  p.fh = numOrNull(raw.fh);
+  p.mh = numOrNull(raw.mh);
+  p.sex = (raw.sex === 'M' || raw.sex === 'F') ? raw.sex : 'F';
+  p.visits = normVisits(raw.visits);
   return p;
 }
 
@@ -206,10 +224,16 @@ function loadPrefs() {
   } catch (e) { return {}; }
 }
 
-/* Called from renderAll() on every change: persist the open patient + prefs. */
+/* Called from renderAll() on every change: persist the open patient + prefs.
+   A write failure (quota, eviction, corrupt store) is NOT a no-op here -- it
+   raises a persistent banner so the user knows to Export JSON. */
+let _saveFails = 0;
+function markSaveOk() { if (_saveFails) { _saveFails = 0; toggleStorageWarn(false); } }
+function markSaveFail() { if (++_saveFails === 1) toggleStorageWarn(true); }
+function toggleStorageWarn(on) { const el = document.getElementById('storageWarn'); if (el) el.hidden = !on; }
 function saveState() {
   savePrefs();
-  if (_db && S._pid) dbPut(patientFromS()).catch(() => {});
+  if (_db && S._pid) dbPut(patientFromS()).then(markSaveOk, markSaveFail);
 }
 
 /* ---- migration from the phase-1 localStorage blob ---- */
@@ -222,9 +246,12 @@ function readLegacyPatient() {
 }
 
 /* ---- patient list operations ---- */
+/* Sorted newest-created first. Deliberately NOT by updatedAt: every keystroke
+   re-saves the open patient, and re-sorting on that would make the list jump
+   around while you type a name. */
 async function livePatients() {
   return (await dbGetAll()).filter(p => !p.deletedAt)
-    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
 /* Switch the live editor (S + form + chart) to a patient. Deliberately
    synchronous: a keystroke that lands immediately after a patient-switch
@@ -239,42 +266,50 @@ function applyPatient(p) {
   renderVisits();
   renderAll();
 }
-async function openPatient(id) {
+/* Wraps a patient-list operation so a mid-session DB failure surfaces the
+   storage banner instead of becoming an unhandled rejection. Calls fn
+   SYNCHRONOUSLY (applyPatient must run before control returns to the event
+   loop -- see the patient-switch note in HANDOFF); only the async tail's
+   rejection is caught. */
+function guard(fn) {
+  const onErr = e => { console.warn('storage op failed:', e); markSaveFail(); };
+  return (...a) => { try { return Promise.resolve(fn(...a)).catch(onErr); } catch (e) { onErr(e); } };
+}
+
+const openPatient = guard(async id => {
   const p = await dbGet(id);
   if (!p) return;
   applyPatient(p);
   renderSidebar();
-}
-async function newPatientAndOpen(seed) {
+});
+const newPatientAndOpen = guard(async seed => {
   const p = seed ? patientFromImport(seed) : blankPatient();
   applyPatient(p);
-  if (_db) await dbPut(p).catch(() => {});   // ensure the row exists before the list re-renders
+  if (_db) await dbPut(p);   // ensure the row exists before the list re-renders
   renderSidebar();
-}
-async function deletePatient(id) {
-  const p = await dbGet(id);
-  if (!p) return;
-  p.deletedAt = Date.now();
-  await dbPut(p);
+});
+const deletePatient = guard(async id => {
+  // Switch AWAY from the target first (if it's open) so its final live state is
+  // saved and no stray keystroke can write to it after we mark it deleted.
   if (id === S._pid) {
-    const rest = await livePatients();
-    if (rest.length) await openPatient(rest[0].id);
-    else await newPatientAndOpen();
-  } else {
-    renderSidebar();
+    const rest = (await livePatients()).filter(p => p.id !== id);
+    await (rest.length ? openPatient(rest[0].id) : newPatientAndOpen());
   }
-}
-async function restorePatient(id) {
-  const p = await dbGet(id);
-  if (!p) return;
-  p.deletedAt = null; p.updatedAt = Date.now();
-  await dbPut(p);
+  const rec = await dbGet(id);
+  if (rec && !rec.deletedAt) { rec.deletedAt = Date.now(); rec.updatedAt = Date.now(); await dbPut(rec); }
   renderSidebar();
-}
+});
+const restorePatient = guard(async id => {
+  const rec = await dbGet(id);          // never the open patient (deleted rows aren't openable)
+  if (!rec) return;
+  rec.deletedAt = null; rec.updatedAt = Date.now();
+  await dbPut(rec);
+  renderSidebar();
+});
 
 /* ---- sidebar rendering ---- */
 let _sbSearch = '', _sbShowDeleted = false, _sbTimer = null;
-function scheduleSidebar() { clearTimeout(_sbTimer); _sbTimer = setTimeout(renderSidebar, 250); }
+function scheduleSidebar() { clearTimeout(_sbTimer); _sbTimer = setTimeout(() => { renderSidebar(); }, 250); }
 function patientAge(p) {
   if (!p.dob) return '';
   const y = ageYears(p.dob, new Date().toISOString().slice(0, 10));
@@ -291,8 +326,10 @@ function patientRowHtml(p, deleted) {
 async function renderSidebar() {
   const card = document.getElementById('patientCard');
   if (!_db || !card) return;
-  const all = await dbGetAll();
-  all.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  let all;
+  try { all = await dbGetAll(); }
+  catch (e) { markSaveFail(); return; }          // broken DB -> leave the list as-is, raise the banner
+  all.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const live = all.filter(p => !p.deletedAt);
   const dead = all.filter(p => p.deletedAt);
   const q = _sbSearch.trim().toLowerCase();
@@ -574,47 +611,8 @@ function renderStackedPanels(mode, sex, ind) {
 /* ---------------------------------------------------------------
    7. Results table
 ----------------------------------------------------------------*/
-function bandOfPct(p) {
-  const edges = [3, 10, 25, 50, 75, 90, 97];
-  if (p < 3) return ['< P3', true];
-  if (p > 97) return ['> P97', true];
-  for (let i = 0; i < edges.length - 1; i++) if (p < edges[i + 1]) return [`P${edges[i]}–P${edges[i + 1]}`, false];
-  return ['P90–P97', false];
-}
-function bandOfZ(z) {
-  if (z < -3) return ['< -3 SD', true];
-  if (z > 3) return ['> +3 SD', true];
-  const edges = [-3, -2, -1, 0, 1, 2, 3];
-  for (let i = 0; i < edges.length - 1; i++) if (z < edges[i + 1]) return [`${edges[i]} to ${edges[i + 1]} SD`, false];
-  return ['2 to 3 SD', false];
-}
-/* Official TSPE BMI-for-age criteria (printed on the source charts):
-   0-5y:  Overweight = SDS >+2 to +3, Obesity = SDS >+3
-   5-19y: Overweight = SDS >+1 to +2 OR BMI 23-24.9, Obesity = SDS >+2 OR BMI ≥25
-          ("ให้วินิจฉัยตามเกณฑ์ที่รุนแรงกว่า" -- whichever criterion is more severe wins) */
-function bmiClassification(ageYr, bmiVal, z) {
-  if (ageYr < 5) {
-    if (z > 3) return 'Obesity';
-    if (z > 2) return 'Overweight';
-    return null;
-  }
-  if (z > 2 || bmiVal >= 25) return 'Obesity';
-  if (z > 1 || bmiVal >= 23) return 'Overweight';
-  return null;
-}
-function bandOfBmi(ageYr, bmiVal, z) {
-  const cls = bmiClassification(ageYr, bmiVal, z);
-  return cls ? [cls, true] : bandOfZ(z);
-}
-
-/* Growth velocity between consecutive visits, in unit/year. Only meaningful
-   for the age-axis modes (ht/wt, BMI, head circ) -- weight-for-height has no
-   time axis. `prev` carries the last visit that had a finite value for that
-   panel, so a gap visit (missing measurement) doesn't break the chain. */
-function velocity(prev, xv, val) {
-  if (!prev || !isFinite(val) || xv - prev.x <= 1 / 365.2425) return null;   // need >= ~1 day apart
-  return (val - prev.val) / (xv - prev.x);
-}
+/* bandOfPct / bandOfZ / bmiClassification / bandOfBmi / velocity / fmtVelocity
+   live in src/engine.js (pure + unit-tested). */
 
 function renderResults() {
   const box = document.getElementById('results');
@@ -626,9 +624,8 @@ function renderResults() {
     const xv = xOfVisit(mode, v);
     const cells = mode.panels.map((P, pi) => {
       const val = P.yOf(v);
-      const rate = showVel ? velocity(prev[pi], xv, val) : null;
-      const vel = rate == null ? '—' : (rate >= 0 ? '+' : '') + rate.toFixed(1);
-      if (isFinite(val)) prev[pi] = { x: xv, val };
+      const vel = showVel ? fmtVelocity(velocity(prev[pi], xv, val)) : '—';
+      if (isFinite(val) && xv >= 0) prev[pi] = { x: xv, val };
       if (!isFinite(val)) return { v: '—', vel, z: '—', pc: '—', b: '' };
       const p = ind[P.indicator][S.sex](xv);
       if (!p) return { v: val.toFixed(1), vel, z: 'นอกช่วง', pc: '—', b: '' };
@@ -711,7 +708,7 @@ function renderAll() {
   const mph = mode.needsParents ? midParental() : null;
   document.getElementById('mphOut').textContent = mph ? mph.toFixed(1) + ' ซม.' : '—';
   document.getElementById('chartTitle').textContent =
-    (S.hn ? esc(S.hn) + ' · ' : '') + (S.sex === 'F' ? 'หญิง' : 'ชาย') + ' · ' + mode.label;
+    (S.hn ? S.hn + ' · ' : '') + (S.sex === 'F' ? 'หญิง' : 'ชาย') + ' · ' + mode.label;  // textContent -- no esc()
   document.getElementById('formulaNote').innerHTML = mode.panels[0].band === 'z'
     ? 'ค่าที่แสดงคือ z-score (SDS) ตรงจากตาราง LMS ที่สกัดจากกราฟ BMI Z-score ต้นฉบับของ TSPE โดยตรง'
     : 'z-score คำนวณด้วยวิธี LMS (Cole &amp; Green): <code>z = ((X/M)^L − 1) / (L·S)</code> เมื่อ L≠0 และ <code>z = ln(X/M)/S</code> เมื่อ L=0';
@@ -815,6 +812,11 @@ document.getElementById('btnExport').addEventListener('click', async () => {
   a.click(); URL.revokeObjectURL(a.href);
 });
 document.getElementById('btnPrint').addEventListener('click', () => window.print());
+
+// Last-chance write when the tab is being hidden/closed -- catches the small
+// window between the final keystroke and teardown (IDB can't be flushed
+// synchronously, but a put started here usually still commits).
+addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveState(); });
 
 document.getElementById('btnImportPatients').addEventListener('click', () => document.getElementById('filePatients').click());
 document.getElementById('filePatients').addEventListener('change', async e => {
@@ -996,9 +998,9 @@ document.getElementById('btnPdf').addEventListener('click', async () => {
         const p = isFinite(val) ? ind[P.indicator][S.sex](xv) : null;
         const z = p ? zFromValue(p, val) : null;
         const rate = showVel ? velocity(prevVel[pi], xv, val) : null;
-        if (isFinite(val)) prevVel[pi] = { x: xv, val };
+        if (isFinite(val) && xv >= 0) prevVel[pi] = { x: xv, val };
         row.push(isFinite(val) ? val.toFixed(1) : '-');
-        if (showVel) row.push(rate == null ? '-' : (rate >= 0 ? '+' : '') + rate.toFixed(1));
+        if (showVel) row.push(rate == null ? '-' : fmtVelocity(rate));
         row.push(z != null ? (z >= 0 ? '+' : '') + z.toFixed(2) : '-');
         if (z == null) { row.push('-'); if (P.band !== 'z') row.push('-'); }
         else if (P.band === 'z') row.push((P.indicator === 'bmi' ? bandOfBmi(xv, val, z) : bandOfZ(z))[0]);
@@ -1033,21 +1035,27 @@ async function initApp() {
   if (S.chartStyle !== 'combined' && S.chartStyle !== 'stacked') S.chartStyle = DEFAULT_STATE.chartStyle;
   if (!REFS[S.ref]) S.ref = DEFAULT_STATE.ref;
 
-  try { _db = await openDB(); } catch (e) { _db = null; }
+  // Guard the WHOLE IndexedDB path, not just open(): in Safari private mode and
+  // modern Firefox open() succeeds and the transactions are what fail. Any
+  // failure here drops to the single-patient / prefs-only fallback.
+  try {
+    _db = await openDB();
+    try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) {}
 
-  if (_db) {
     let all = await dbGetAll();
     if (!all.length && !localStorage.getItem(MIGRATED_KEY)) {   // one-time: pull in the phase-1 blob
       const legacy = readLegacyPatient();
       if (legacy) { await dbPut(legacy); all = [legacy]; }
-      try { localStorage.setItem(MIGRATED_KEY, '1'); } catch (e) {}
+      try { localStorage.setItem(MIGRATED_KEY, '1'); localStorage.removeItem(LEGACY_KEY); } catch (e) {}
     }
-    if (!all.length) { const p = blankPatient(); await dbPut(p); all = [p]; }
-    const live = all.filter(p => !p.deletedAt).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    const pick = live.find(p => p.id === prefs.lastPatientId) || live[0] || all[0];
+    const live = all.filter(p => !p.deletedAt).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    let pick = live.find(p => p.id === prefs.lastPatientId) || live[0];
+    if (!pick) { pick = blankPatient(); await dbPut(pick); }   // never fall back to a soft-deleted row
     sFromPatient(pick);
-  } else {
-    document.getElementById('patientCard').hidden = true;       // no IndexedDB (e.g. private mode): single-patient fallback
+  } catch (e) {
+    console.warn('IndexedDB unavailable — single-patient fallback:', e);
+    _db = null;
+    document.getElementById('patientCard').hidden = true;
     sFromPatient(readLegacyPatient() || blankPatient());
   }
 

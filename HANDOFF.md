@@ -160,6 +160,22 @@ file):
 - An explicit `display:` in author CSS overrides the UA `[hidden]` rule, so
   `button.linky` needs its own `[hidden]{display:none}` — otherwise the
   "ดูที่ลบแล้ว" toggle (shown/hidden via the `hidden` property) never hides.
+- Every IndexedDB failure path must be visible. `saveState()` raises the
+  `#storageWarn` banner on a rejected write (not a `.catch(()=>{})` no-op);
+  `initApp()` wraps the *whole* IDB block (Safari private mode / modern
+  Firefox: `open()` succeeds, the *transactions* fail) and drops to the
+  single-patient fallback; the `guard()` wrapper does the same for the
+  patient-list ops. `guard()` calls its fn synchronously — `applyPatient`
+  must still run before control returns (see the patient-switch note above).
+- `patientFromS()` preserves the record's `deletedAt` — an earlier version
+  hardcoded `null`, so any `saveState()` (or `initApp` falling back to
+  `all[0]`) could resurrect a soft-deleted patient. `deletePatient()`
+  switches away from the target *before* marking it deleted.
+- `patientFromImport()` coerces `fh`/`mh` via `parseFloat` and normalises
+  every visit row — a stray `"fh": "163"` (string) in an imported/edited
+  JSON otherwise made `midParental()` do string concat (MPH in the millions).
+- Sidebar sorts by `createdAt`, not `updatedAt`: every keystroke re-saves
+  the open patient, so an `updatedAt` sort made the list jump while typing.
 
 ## Done since the original handoff
 
@@ -167,11 +183,13 @@ file):
   change between consecutive visits for the age-axis modes (`velocity()` in
   `main.js`; weight-for-height has no time axis so it's omitted there).
 - **Automated tests** — `tests/unit/` (node --test, zero deps) covers the LMS
-  engine, table integrity, the boundary cases listed below, and a closed-loop
-  check of the shipped tables against `extraction/digitized_raw/`.
-  `tests/e2e/app.spec.js` (Playwright) covers the UI + persistence. Both run
-  in CI. `initApp()` sets `<html data-ready>` when startup finishes — e2e
-  tests wait on that.
+  engine, table integrity, the boundary cases listed below, the TSPE BMI
+  classification criteria, growth-velocity edge cases, and a closed-loop
+  check of the shipped tables against `extraction/digitized_raw/` (all six
+  percentile/SDS files that map cleanly; tolerances are ~3–5× the measured
+  residual). `tests/e2e/app.spec.js` (Playwright) covers the UI + persistence
+  + export/import round-trip + a PDF smoke test. Both run in CI. `initApp()`
+  sets `<html data-ready>` when startup finishes — e2e tests wait on that.
 
 ## Not yet done
 
@@ -179,6 +197,16 @@ file):
   actually verified — the sandbox this was built in couldn't download
   those browser engines (network-restricted). If something looks broken
   specifically on iOS Safari, start there.
+- **Concurrent tabs**: `saveState()` writes the whole open-patient snapshot
+  with no compare-and-swap, so two tabs editing the same patient is
+  last-writer-wins with no conflict detection. `onversionchange`/`onblocked`
+  are handled (a future `DB_VERSION` bump won't hang); a real CAS
+  (reject a write whose stored `updatedAt` is newer than the loaded one)
+  is not. Low priority for a single-clinician demo.
+- **PDF table width**: adding the velocity column takes the height/weight
+  PDF table to 12 columns at 7.5pt across A4 — band labels like `P25–P50`
+  are near the edge of their cell. Fine on screen (scrolls); tighten the
+  PDF font or drop a column if it actually overflows in practice.
 - Data persistence — direction is client-side only (keeps the "data never
   leaves the browser" property, so it still ships on GitHub Pages):
   - **Phase 1 (done):** localStorage autosave of `S`.

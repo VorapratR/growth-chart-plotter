@@ -64,8 +64,67 @@ function fixed(tab, toMonths) {
   return x => x == null ? null : lmsAt(tab, toMonths ? toMonths(x) : x);
 }
 
+/* ---------------------------------------------------------------
+   Classification bands + growth velocity — pure, and load-bearing
+   clinically (bmiClassification encodes TSPE's official criteria),
+   so kept here where the unit tests can reach them.
+----------------------------------------------------------------*/
+function bandOfPct(p) {
+  const edges = [3, 10, 25, 50, 75, 90, 97];
+  if (p < 3) return ['< P3', true];
+  if (p > 97) return ['> P97', true];
+  for (let i = 0; i < edges.length - 1; i++) if (p < edges[i + 1]) return [`P${edges[i]}–P${edges[i + 1]}`, false];
+  return ['P90–P97', false];
+}
+function bandOfZ(z) {
+  if (z < -3) return ['< -3 SD', true];
+  if (z > 3) return ['> +3 SD', true];
+  const edges = [-3, -2, -1, 0, 1, 2, 3];
+  for (let i = 0; i < edges.length - 1; i++) if (z < edges[i + 1]) return [`${edges[i]} to ${edges[i + 1]} SD`, false];
+  return ['2 to 3 SD', false];
+}
+/* Official TSPE BMI-for-age criteria (printed on the source charts):
+   0-5y:  Overweight = SDS >+2 to +3, Obesity = SDS >+3
+   5-19y: Overweight = SDS >+1 to +2 OR BMI 23-24.9, Obesity = SDS >+2 OR BMI ≥25
+          ("ให้วินิจฉัยตามเกณฑ์ที่รุนแรงกว่า" -- whichever criterion is more severe wins) */
+function bmiClassification(ageYr, bmiVal, z) {
+  if (ageYr < 5) {
+    if (z > 3) return 'Obesity';
+    if (z > 2) return 'Overweight';
+    return null;
+  }
+  if (z > 2 || bmiVal >= 25) return 'Obesity';
+  if (z > 1 || bmiVal >= 23) return 'Overweight';
+  return null;
+}
+function bandOfBmi(ageYr, bmiVal, z) {
+  const cls = bmiClassification(ageYr, bmiVal, z);
+  return cls ? [cls, true] : bandOfZ(z);
+}
+
+/* Growth velocity between consecutive visits, in unit/year. Only meaningful
+   for the age-axis modes -- weight-for-height has no time axis. `prev` is the
+   last visit that had a finite value for that panel, so a gap visit doesn't
+   break the chain. Intervals shorter than VEL_MIN_YEARS are skipped:
+   annualizing a 2-day gap amplifies measurement noise ~180x and prints an
+   alarming, meaningless rate. Negative-age endpoints (visit before DOB) too. */
+const VEL_MIN_YEARS = 0.25;
+function velocity(prev, xv, val) {
+  if (!prev || !isFinite(val) || prev.x < 0 || xv < 0) return null;
+  const dt = xv - prev.x;
+  return dt < VEL_MIN_YEARS ? null : (val - prev.val) / dt;
+}
+function fmtVelocity(rate) {
+  if (rate == null) return '—';
+  const r = Number(rate.toFixed(1));           // round first so -0.04 -> "0.0", not "-0.0"
+  return (r > 0 ? '+' : '') + r.toFixed(1);
+}
+
 /* Node/test entry point only -- `typeof module` is "undefined" in the browser
    bundle, so this block is skipped there. */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { lmsAt, zFromValue, valueFromZ, erfc, pctFromZ, ageYears, splice, fixed };
+  module.exports = {
+    lmsAt, zFromValue, valueFromZ, erfc, pctFromZ, ageYears, splice, fixed,
+    bandOfPct, bandOfZ, bmiClassification, bandOfBmi, velocity, fmtVelocity, VEL_MIN_YEARS,
+  };
 }
