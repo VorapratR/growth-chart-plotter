@@ -8,7 +8,17 @@
 <div class="wrap">
   <!-- ============ LEFT: input ============ -->
   <div>
-    <section class="card">
+    <section class="card" id="patientCard">
+      <h2>คนไข้</h2>
+      <div class="body">
+        <input type="search" id="ptSearch" placeholder="ค้นหา ชื่อ / HN" autocomplete="off">
+        <div class="ptlist" id="ptList"></div>
+        <button class="add" id="btnNewPatient" type="button">+ เพิ่มคนไข้</button>
+        <button class="linky" id="btnToggleDeleted" type="button" hidden></button>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:16px">
       <h2>ชนิดกราฟ</h2>
       <div class="body">
         <div class="seg seg4" id="modeSeg">
@@ -64,13 +74,15 @@
         <div class="tools">
           <button type="button" id="btnDemo">ใส่ข้อมูลตัวอย่าง</button>
           <button type="button" id="btnPdf">Export PDF</button>
-          <button type="button" id="btnExport">Export JSON</button>
           <button type="button" id="btnPrint">พิมพ์</button>
         </div>
         <div class="tools" style="margin-top:8px">
+          <button type="button" id="btnExport">Export JSON</button>
+          <button type="button" id="btnImportPatients">นำเข้า JSON</button>
           <button type="button" id="btnClear">ล้างข้อมูลทั้งหมด</button>
         </div>
-        <p class="note" style="padding:8px 2px 0;border:0">บันทึกอัตโนมัติในเบราว์เซอร์นี้เท่านั้น — ไม่ส่งออกไปที่ใด และจะหายถ้าล้างข้อมูลเว็บไซต์ กด Export JSON เพื่อสำรอง/ย้ายเครื่อง</p>
+        <input type="file" id="filePatients" accept=".json,application/json" hidden>
+        <p class="note" style="padding:8px 2px 0;border:0">คนไข้ทุกรายบันทึกอัตโนมัติในเบราว์เซอร์นี้เท่านั้น (IndexedDB) — ไม่ส่งออกไปที่ใด และจะหายถ้าล้างข้อมูลเว็บไซต์ · Export JSON = สำรอง/ย้ายเครื่องได้ทั้งหมด</p>
       </div>
     </section>
 

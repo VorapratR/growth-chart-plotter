@@ -25,7 +25,7 @@ build.sh                Regenerates dist/index.html from src/
 src/
   head.html             <head>: CSS, embedded @font-face (base64)
   body.html              <body> markup: layout, forms, chart/results containers
-  main.js                 All app logic (~800 lines) — see "Code map" below
+  main.js                 All app logic (~1080 lines) — see "Code map" below
   data/
     tspe_lms_and_cdc.js   Height/weight LMS tables, 2–19y (TSPE + CDC reference)
     all_new_lms.js        BMI, head-circumference, 0–2y, weight-for-height LMS tables
@@ -92,15 +92,22 @@ Roughly top-to-bottom:
 3. `splice()`/`fixed()` — wrap two age-banded tables (or one) into a single
    lookup function per sex/indicator
 4. `MODES` — the 4 chart-mode configs (domains, panels, labels)
-5. Chart rendering — `renderCombinedTwoScale` (dual-axis single-grid) and
-   `renderStackedPanels` (2 separate panels), dispatched by
-   `S.chartStyle`
-6. Results table — `renderResults`, including `bmiClassification` (TSPE's
+5. State + persistence — `S` (open patient + view settings), the IndexedDB
+   wrapper (`openDB`/`dbGetAll`/`dbPut`/…), `patientFromS`/`sFromPatient`,
+   prefs load/save, `saveState`, migration, patient-list ops
+   (`openPatient`/`newPatientAndOpen`/`deletePatient`/`restorePatient`),
+   `renderSidebar`, `syncControls`
+6. Chart rendering — `renderCombinedTwoScale` (dual-axis single-grid) and
+   `renderStackedPanels` (2 separate panels), dispatched by `S.chartStyle`
+7. Results table — `renderResults`, including `bmiClassification` (TSPE's
    official Overweight/Obesity rules)
-7. UI wiring — mode/sex/style toggles, visit-row editing, demo data
-8. PDF export — clones the live SVG, bakes computed CSS styles into literal
+8. UI wiring — mode/sex/style toggles, visit-row editing, demo data,
+   sidebar events, JSON export/import, clear-all
+9. PDF export — clones the live SVG, bakes computed CSS styles into literal
    attributes (svg2pdf can't resolve CSS custom properties), embeds Thai
    font, recreates the paper-form layout
+10. `initApp()` — async startup (open DB → migrate → load patient + prefs
+    → render)
 
 ## Known bugs fixed along the way (useful context, don't re-break these)
 
@@ -146,13 +153,21 @@ Roughly top-to-bottom:
   keeps growing. CI (below) currently only checks that the bundle builds.
 - Data persistence — direction is client-side only (keeps the "data never
   leaves the browser" property, so it still ships on GitHub Pages):
-  - **Phase 1 (done):** `saveState()` / `loadState()` / `syncControls()` in
-    `src/main.js` autosave `S` to `localStorage` on every `renderAll()` and
-    restore it on startup. "ล้างข้อมูลทั้งหมด" button wipes it.
-  - **Phase 2 (todo):** IndexedDB multi-patient store — split `S` into
-    `patient` + `visit` records, patient-list sidebar, search, soft-delete.
-  - The `S` <-> storage boundary is where a future backend-sync layer would
-    attach, if a real multi-device need ever appears.
+  - **Phase 1 (done):** localStorage autosave of `S`.
+  - **Phase 2 (done):** IndexedDB store `growthchart` / object store
+    `patients` (one row per patient, visits embedded). `S` still holds the
+    *open* patient plus view settings; `S._pid` maps it to a stored row.
+    `saveState()` writes the open patient to IDB + view settings to
+    `localStorage` (`growthchart:prefs:v1`) on every `renderAll()`.
+    `initApp()` opens the DB, migrates the phase-1 blob once
+    (`growthchart:migrated:v2` flag), and reopens the last patient.
+    Sidebar "คนไข้" card: list / search / new / soft-delete (`deletedAt`)
+    / restore. Export JSON now emits a `growthchart/v2` bundle of all live
+    patients; "นำเข้า JSON" imports it (or a phase-1 single-patient file).
+    If IndexedDB is unavailable (private mode) the sidebar is hidden and it
+    degrades to single-patient / prefs-only.
+  - **Phase 3 (todo, only if needed):** a sync layer at the `S` <-> storage
+    boundary for real multi-device use.
 
 ## Deployment / CI
 

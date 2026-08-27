@@ -170,28 +170,191 @@ const curIndicators = () => indicators(REFS[S.ref]);
 const curMode = () => MODES[S.mode];
 
 /* --- local persistence (this browser only; no server) -------------------
-   Autosaves S on every render and restores it on load. Patient data still
-   never leaves the browser: this is localStorage, not a network call. */
-const STORAGE_KEY = 'growthchart:state:v1';
+   Patient records live in IndexedDB (one row per patient, visits embedded);
+   view settings (mode / chart style / reference set) live in localStorage.
+   Nothing is transmitted -- this is all on-device storage, not a network
+   call. `S` stays the single object the chart/results/PDF code reads: it
+   holds the currently-open patient's fields plus the view settings, and
+   `S._pid` / `S._createdAt` track which stored record it maps to. */
+
+const LEGACY_KEY = 'growthchart:state:v1';     // phase-1 single-blob store (migrated once, then left as a backup)
+const MIGRATED_KEY = 'growthchart:migrated:v2';
+const PREFS_KEY = 'growthchart:prefs:v1';
+const PREF_KEYS = ['mode', 'chartStyle', 'ref'];
+const PATIENT_KEYS = ['hn', 'sex', 'dob', 'fh', 'mh', 'visits'];
+const BLANK_VISITS = () => [{ date: '', ht: '', wt: '', hc: '' }];
+
+/* ---- IndexedDB (tiny promise wrapper) ---- */
+const DB_NAME = 'growthchart', DB_VERSION = 1, STORE = 'patients';
+let _db = null;
+function openDB() {
+  return new Promise((resolve, reject) => {
+    let req;
+    try { req = indexedDB.open(DB_NAME, DB_VERSION); } catch (e) { return reject(e); }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function dbOp(mode, fn) {
+  return new Promise((resolve, reject) => {
+    let tx;
+    try { tx = _db.transaction(STORE, mode); } catch (e) { return reject(e); }
+    const req = fn(tx.objectStore(STORE));
+    tx.oncomplete = () => resolve(req ? req.result : undefined);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+const dbGetAll = () => dbOp('readonly', os => os.getAll());
+const dbGet = id => dbOp('readonly', os => os.get(id));
+const dbPut = rec => dbOp('readwrite', os => os.put(rec));
+const dbClearAll = () => dbOp('readwrite', os => os.clear());
+
+/* ---- patient <-> S ---- */
+function newId() {
+  return (self.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : 'p-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+function blankPatient() {
+  const t = Date.now();
+  return { id: newId(), hn: '', sex: 'F', dob: '', fh: null, mh: null,
+           visits: BLANK_VISITS(), createdAt: t, updatedAt: t, deletedAt: null };
+}
+function sFromPatient(p) {
+  S._pid = p.id;
+  S._createdAt = p.createdAt || Date.now();
+  S.hn = p.hn || ''; S.dob = p.dob || '';
+  S.fh = p.fh ?? null; S.mh = p.mh ?? null;
+  S.sex = (p.sex === 'M' || p.sex === 'F') ? p.sex : 'F';
+  S.visits = (Array.isArray(p.visits) && p.visits.length) ? p.visits.map(v => ({
+    date: v.date || '', ht: v.ht || '', wt: v.wt || '', hc: v.hc || ''
+  })) : BLANK_VISITS();
+}
+function patientFromS() {
+  const p = { id: S._pid, createdAt: S._createdAt || Date.now(), updatedAt: Date.now(), deletedAt: null };
+  for (const k of PATIENT_KEYS) p[k] = S[k];
+  return p;
+}
+function patientFromImport(raw) {
+  const p = blankPatient();
+  for (const k of PATIENT_KEYS) if (k in raw) p[k] = raw[k];
+  if (p.sex !== 'M' && p.sex !== 'F') p.sex = 'F';
+  if (!Array.isArray(p.visits) || !p.visits.length) p.visits = BLANK_VISITS();
+  return p;
+}
+
+/* ---- view-settings prefs ---- */
+function savePrefs() {
+  try {
+    const p = { lastPatientId: S._pid };
+    for (const k of PREF_KEYS) p[k] = S[k];
+    localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+  } catch (e) { /* private mode / quota -- skip */ }
+}
+function loadPrefs() {
+  try { const p = JSON.parse(localStorage.getItem(PREFS_KEY)); if (p) return p; } catch (e) {}
+  try {                                    // fall back to the phase-1 blob's settings
+    const legacy = JSON.parse(localStorage.getItem(LEGACY_KEY)) || {};
+    return { mode: legacy.mode, chartStyle: legacy.chartStyle, ref: legacy.ref };
+  } catch (e) { return {}; }
+}
+
+/* Called from renderAll() on every change: persist the open patient + prefs. */
 function saveState() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(S)); }
-  catch (e) { /* private mode / quota exceeded -- nothing we can do, skip */ }
+  savePrefs();
+  if (_db && S._pid) dbPut(patientFromS()).catch(() => {});
 }
-function loadState() {
-  let raw;
-  try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { return false; }
-  if (!raw) return false;
+
+/* ---- migration from the phase-1 localStorage blob ---- */
+function readLegacyPatient() {
   let j;
-  try { j = JSON.parse(raw); } catch (e) { return false; }
-  if (!j || typeof j !== 'object' || !Array.isArray(j.visits)) return false;
-  for (const k of Object.keys(DEFAULT_STATE)) if (k in j) S[k] = j[k];
-  if (!MODES[S.mode]) S.mode = DEFAULT_STATE.mode;
-  if (S.sex !== 'M' && S.sex !== 'F') S.sex = DEFAULT_STATE.sex;
-  if (!REFS[S.ref]) S.ref = DEFAULT_STATE.ref;               // e.g. a since-gone "imported" table
-  if (S.chartStyle !== 'combined' && S.chartStyle !== 'stacked') S.chartStyle = DEFAULT_STATE.chartStyle;
-  if (!S.visits.length) S.visits = [{ date: '', ht: '', wt: '', hc: '' }];
-  return true;
+  try { j = JSON.parse(localStorage.getItem(LEGACY_KEY)); } catch (e) { return null; }
+  if (!j || typeof j !== 'object' || !Array.isArray(j.visits)) return null;
+  const hasData = j.hn || j.dob || j.visits.some(v => v.date || v.ht || v.wt || v.hc);
+  return hasData ? patientFromImport(j) : null;
 }
+
+/* ---- patient list operations ---- */
+async function livePatients() {
+  return (await dbGetAll()).filter(p => !p.deletedAt)
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+async function openPatient(id) {
+  const p = await dbGet(id);
+  if (!p) return;
+  sFromPatient(p);
+  savePrefs();
+  syncControls();
+  renderVisitHead(); renderVisits(); renderAll();
+  renderSidebar();
+}
+async function newPatientAndOpen(seed) {
+  const p = seed ? patientFromImport(seed) : blankPatient();
+  if (_db) { await dbPut(p); await openPatient(p.id); }
+  else { sFromPatient(p); syncControls(); renderVisitHead(); renderVisits(); renderAll(); }
+}
+async function deletePatient(id) {
+  const p = await dbGet(id);
+  if (!p) return;
+  p.deletedAt = Date.now();
+  await dbPut(p);
+  if (id === S._pid) {
+    const rest = await livePatients();
+    if (rest.length) await openPatient(rest[0].id);
+    else await newPatientAndOpen();
+  } else {
+    renderSidebar();
+  }
+}
+async function restorePatient(id) {
+  const p = await dbGet(id);
+  if (!p) return;
+  p.deletedAt = null; p.updatedAt = Date.now();
+  await dbPut(p);
+  renderSidebar();
+}
+
+/* ---- sidebar rendering ---- */
+let _sbSearch = '', _sbShowDeleted = false, _sbTimer = null;
+function scheduleSidebar() { clearTimeout(_sbTimer); _sbTimer = setTimeout(renderSidebar, 250); }
+function patientAge(p) {
+  if (!p.dob) return '';
+  const y = ageYears(p.dob, new Date().toISOString().slice(0, 10));
+  return (y != null && y >= 0) ? ' · ' + y.toFixed(1) + ' ปี' : '';
+}
+function patientRowHtml(p, deleted) {
+  const nVisits = (p.visits || []).filter(v => v.date || v.ht || v.wt || v.hc).length;
+  const sub = (p.sex === 'M' ? 'ชาย' : 'หญิง') + patientAge(p) + ' · ' + nVisits + ' ครั้ง';
+  return `<div class="pt${p.id === S._pid && !deleted ? ' cur' : ''}"${deleted ? '' : ` data-open="${p.id}"`}>
+      <div class="pt-main"><b>${esc(p.hn || '(ไม่ระบุชื่อ/HN)')}</b><span>${esc(sub)}</span></div>
+      <button class="mini" type="button" data-${deleted ? 'restore' : 'del'}="${p.id}" aria-label="${deleted ? 'กู้คืน' : 'ลบ'}">${deleted ? '↺' : '×'}</button>
+    </div>`;
+}
+async function renderSidebar() {
+  const card = document.getElementById('patientCard');
+  if (!_db || !card) return;
+  const all = await dbGetAll();
+  all.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  const live = all.filter(p => !p.deletedAt);
+  const dead = all.filter(p => p.deletedAt);
+  const q = _sbSearch.trim().toLowerCase();
+  const shown = q ? live.filter(p => (p.hn || '').toLowerCase().includes(q)) : live;
+
+  let html = shown.map(p => patientRowHtml(p, false)).join('');
+  if (!shown.length) html = `<div class="pt-empty">${q ? 'ไม่พบคนไข้ที่ค้นหา' : 'ยังไม่มีคนไข้'}</div>`;
+  if (_sbShowDeleted && dead.length)
+    html += `<div class="pt-empty" style="padding-bottom:4px">ที่ลบแล้ว</div>` + dead.map(p => patientRowHtml(p, true)).join('');
+  document.getElementById('ptList').innerHTML = html;
+
+  const tog = document.getElementById('btnToggleDeleted');
+  tog.hidden = !dead.length;
+  tog.textContent = (_sbShowDeleted ? 'ซ่อน' : 'ดู') + `ที่ลบแล้ว (${dead.length})`;
+}
+
 /* push S back out to the form controls (after a restore or a clear) */
 function syncControls() {
   document.getElementById('hn').value = S.hn || '';
@@ -579,6 +742,7 @@ function renderAll() {
   renderChart();
   renderResults();
   saveState();
+  scheduleSidebar();
 }
 
 document.getElementById('modeSeg').addEventListener('click', e => {
@@ -659,26 +823,79 @@ const DEMOS = {
 };
 document.getElementById('btnDemo').addEventListener('click', () => {
   const d = DEMOS[S.mode]();
-  Object.assign(S, d);
-  hn.value = S.hn; dob.value = S.dob; fh.value = S.fh ?? ''; mh.value = S.mh ?? '';
-  [...document.getElementById('sexSeg').children].forEach(x => x.setAttribute('aria-pressed', x.dataset.sex === S.sex));
-  renderVisitHead(); renderVisits(); renderAll();
+  newPatientAndOpen(d);       // demo data goes into a fresh patient, not over the open one
 });
-document.getElementById('btnExport').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' });
+document.getElementById('btnExport').addEventListener('click', async () => {
+  const patients = _db ? (await dbGetAll()).filter(p => !p.deletedAt) : [patientFromS()];
+  const bundle = {
+    schema: 'growthchart/v2', exportedAt: new Date().toISOString(),
+    prefs: { mode: S.mode, chartStyle: S.chartStyle, ref: S.ref },
+    patients
+  };
+  const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = (S.hn ? S.hn.replace(/[^\w-]/g, '_') : 'growth') + '_' + S.mode + '.json';
+  a.download = 'growth-chart_' + new Date().toISOString().slice(0, 10) + '_' + patients.length + 'pt.json';
   a.click(); URL.revokeObjectURL(a.href);
 });
 document.getElementById('btnPrint').addEventListener('click', () => window.print());
 
-document.getElementById('btnClear').addEventListener('click', () => {
-  if (!confirm('ล้างข้อมูลผู้ป่วยและการวัดทั้งหมดในเครื่องนี้? กู้คืนไม่ได้ (แนะนำกด Export JSON เก็บไว้ก่อน)')) return;
-  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-  Object.assign(S, JSON.parse(JSON.stringify(DEFAULT_STATE)));
-  syncControls();
-  renderVisitHead(); renderVisits(); renderAll();
+document.getElementById('btnImportPatients').addEventListener('click', () => document.getElementById('filePatients').click());
+document.getElementById('filePatients').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) { return; }
+  try {
+    const j = JSON.parse(await f.text());
+    let incoming;
+    if (j && j.schema === 'growthchart/v2' && Array.isArray(j.patients)) incoming = j.patients;
+    else if (j && Array.isArray(j.visits)) incoming = [j];        // a phase-1 single-patient export
+    else throw new Error('ไม่ใช่ไฟล์ข้อมูลคนไข้ที่รู้จัก');
+    if (!incoming.length) throw new Error('ไม่พบข้อมูลคนไข้ในไฟล์');
+    if (!confirm(`นำเข้า ${incoming.length} คนไข้ (เพิ่มใหม่ ไม่ทับของเดิม)?`)) { e.target.value = ''; return; }
+    let firstId = null;
+    for (const raw of incoming) {
+      const p = patientFromImport(raw);
+      if (_db) await dbPut(p);
+      firstId = firstId || p.id;
+    }
+    if (_db && firstId) await openPatient(firstId);
+    alert(`นำเข้า ${incoming.length} คนไข้แล้ว`);
+  } catch (err) {
+    alert('นำเข้าไม่สำเร็จ: ' + err.message);
+  }
+  e.target.value = '';
+});
+
+document.getElementById('btnClear').addEventListener('click', async () => {
+  if (!confirm('ล้างข้อมูลคนไข้ทั้งหมดในเครื่องนี้? กู้คืนไม่ได้ (แนะนำกด Export JSON เก็บไว้ก่อน)')) return;
+  try {
+    localStorage.removeItem(PREFS_KEY);
+    localStorage.removeItem(LEGACY_KEY);
+    localStorage.removeItem(MIGRATED_KEY);
+  } catch (e) {}
+  if (_db) { try { await dbClearAll(); } catch (e) {} }
+  for (const k of PREF_KEYS) S[k] = DEFAULT_STATE[k];
+  _sbSearch = ''; _sbShowDeleted = false;
+  const srch = document.getElementById('ptSearch'); if (srch) srch.value = '';
+  await newPatientAndOpen();
+});
+
+/* ---- sidebar: patient list events ---- */
+document.getElementById('ptList').addEventListener('click', e => {
+  const del = e.target.closest('button[data-del]');
+  if (del) { e.stopPropagation();
+    if (confirm('ลบคนไข้รายนี้? (ย้ายไปที่ลบแล้ว กู้คืนได้)')) deletePatient(del.dataset.del);
+    return; }
+  const res = e.target.closest('button[data-restore]');
+  if (res) { e.stopPropagation(); restorePatient(res.dataset.restore); return; }
+  const row = e.target.closest('[data-open]');
+  if (row && row.dataset.open !== S._pid) openPatient(row.dataset.open);
+});
+document.getElementById('ptSearch').addEventListener('input', e => {
+  _sbSearch = e.target.value; renderSidebar();
+});
+document.getElementById('btnNewPatient').addEventListener('click', () => newPatientAndOpen());
+document.getElementById('btnToggleDeleted').addEventListener('click', () => {
+  _sbShowDeleted = !_sbShowDeleted; renderSidebar();
 });
 
 document.getElementById('btnImport').addEventListener('click', () => document.getElementById('fileLms').click());
@@ -825,7 +1042,38 @@ document.getElementById('btnPdf').addEventListener('click', async () => {
   }
 });
 
-if (loadState()) syncControls();
-renderVisitHead();
-renderVisits();
-renderAll();
+/* ---------------------------------------------------------------
+   10. Startup
+----------------------------------------------------------------*/
+async function initApp() {
+  const prefs = loadPrefs();
+  for (const k of PREF_KEYS) if (prefs[k] != null) S[k] = prefs[k];
+  if (!MODES[S.mode]) S.mode = DEFAULT_STATE.mode;
+  if (S.chartStyle !== 'combined' && S.chartStyle !== 'stacked') S.chartStyle = DEFAULT_STATE.chartStyle;
+  if (!REFS[S.ref]) S.ref = DEFAULT_STATE.ref;
+
+  try { _db = await openDB(); } catch (e) { _db = null; }
+
+  if (_db) {
+    let all = await dbGetAll();
+    if (!all.length && !localStorage.getItem(MIGRATED_KEY)) {   // one-time: pull in the phase-1 blob
+      const legacy = readLegacyPatient();
+      if (legacy) { await dbPut(legacy); all = [legacy]; }
+      try { localStorage.setItem(MIGRATED_KEY, '1'); } catch (e) {}
+    }
+    if (!all.length) { const p = blankPatient(); await dbPut(p); all = [p]; }
+    const live = all.filter(p => !p.deletedAt).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const pick = live.find(p => p.id === prefs.lastPatientId) || live[0] || all[0];
+    sFromPatient(pick);
+  } else {
+    document.getElementById('patientCard').hidden = true;       // no IndexedDB (e.g. private mode): single-patient fallback
+    sFromPatient(readLegacyPatient() || blankPatient());
+  }
+
+  syncControls();
+  renderVisitHead();
+  renderVisits();
+  renderAll();
+  renderSidebar();
+}
+initApp().catch(err => { console.error(err); alert('เริ่มต้นแอปไม่สำเร็จ: ' + err.message); });
