@@ -160,13 +160,49 @@ function modeXMax(mode, sex) {
 /* ---------------------------------------------------------------
    5. State
 ----------------------------------------------------------------*/
-const S = {
+const DEFAULT_STATE = {
   mode: 'ht_wt', sex: 'F', hn: '', dob: '', fh: null, mh: null, ref: 'tspe2565', chartStyle: 'combined',
   visits: [{ date: '', ht: '', wt: '', hc: '' }]
 };
+const S = JSON.parse(JSON.stringify(DEFAULT_STATE));
 const midParental = () => (S.fh && S.mh) ? (S.fh + S.mh + (S.sex === 'M' ? 13 : -13)) / 2 : null;
 const curIndicators = () => indicators(REFS[S.ref]);
 const curMode = () => MODES[S.mode];
+
+/* --- local persistence (this browser only; no server) -------------------
+   Autosaves S on every render and restores it on load. Patient data still
+   never leaves the browser: this is localStorage, not a network call. */
+const STORAGE_KEY = 'growthchart:state:v1';
+function saveState() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(S)); }
+  catch (e) { /* private mode / quota exceeded -- nothing we can do, skip */ }
+}
+function loadState() {
+  let raw;
+  try { raw = localStorage.getItem(STORAGE_KEY); } catch (e) { return false; }
+  if (!raw) return false;
+  let j;
+  try { j = JSON.parse(raw); } catch (e) { return false; }
+  if (!j || typeof j !== 'object' || !Array.isArray(j.visits)) return false;
+  for (const k of Object.keys(DEFAULT_STATE)) if (k in j) S[k] = j[k];
+  if (!MODES[S.mode]) S.mode = DEFAULT_STATE.mode;
+  if (S.sex !== 'M' && S.sex !== 'F') S.sex = DEFAULT_STATE.sex;
+  if (!REFS[S.ref]) S.ref = DEFAULT_STATE.ref;               // e.g. a since-gone "imported" table
+  if (S.chartStyle !== 'combined' && S.chartStyle !== 'stacked') S.chartStyle = DEFAULT_STATE.chartStyle;
+  if (!S.visits.length) S.visits = [{ date: '', ht: '', wt: '', hc: '' }];
+  return true;
+}
+/* push S back out to the form controls (after a restore or a clear) */
+function syncControls() {
+  document.getElementById('hn').value = S.hn || '';
+  document.getElementById('dob').value = S.dob || '';
+  document.getElementById('fh').value = S.fh ?? '';
+  document.getElementById('mh').value = S.mh ?? '';
+  for (const [id, attr, val] of [['sexSeg', 'sex', S.sex], ['modeSeg', 'mode', S.mode], ['styleSeg', 'style', S.chartStyle]])
+    [...document.getElementById(id).children].forEach(x => x.setAttribute('aria-pressed', x.dataset[attr] === val));
+  const rs = document.getElementById('refSel');
+  if ([...rs.options].some(o => o.value === S.ref)) rs.value = S.ref;
+}
 
 /* ---------------------------------------------------------------
    6. Chart (generalized: 1 or 2 stacked panels, age or height x-axis,
@@ -542,6 +578,7 @@ function renderAll() {
     : 'z-score คำนวณด้วยวิธี LMS (Cole &amp; Green): <code>z = ((X/M)^L − 1) / (L·S)</code> เมื่อ L≠0 และ <code>z = ln(X/M)/S</code> เมื่อ L=0';
   renderChart();
   renderResults();
+  saveState();
 }
 
 document.getElementById('modeSeg').addEventListener('click', e => {
@@ -635,6 +672,14 @@ document.getElementById('btnExport').addEventListener('click', () => {
   a.click(); URL.revokeObjectURL(a.href);
 });
 document.getElementById('btnPrint').addEventListener('click', () => window.print());
+
+document.getElementById('btnClear').addEventListener('click', () => {
+  if (!confirm('ล้างข้อมูลผู้ป่วยและการวัดทั้งหมดในเครื่องนี้? กู้คืนไม่ได้ (แนะนำกด Export JSON เก็บไว้ก่อน)')) return;
+  try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+  Object.assign(S, JSON.parse(JSON.stringify(DEFAULT_STATE)));
+  syncControls();
+  renderVisitHead(); renderVisits(); renderAll();
+});
 
 document.getElementById('btnImport').addEventListener('click', () => document.getElementById('fileLms').click());
 document.getElementById('fileLms').addEventListener('change', async e => {
@@ -780,6 +825,7 @@ document.getElementById('btnPdf').addEventListener('click', async () => {
   }
 });
 
+if (loadState()) syncControls();
 renderVisitHead();
 renderVisits();
 renderAll();
